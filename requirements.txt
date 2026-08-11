@@ -1,0 +1,8 @@
+streamlit==1.61.1
+torch==2.13.0
+yfinance==1.5.2
+plotly==6.9.0
+joblib==1.5.3
+scikit-learn==1.9.0
+pandas==3.0.5
+numpy==2.5.2
