@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import streamlit as st
 import plotly.graph_objects as go
 from sklearn.preprocessing import StandardScaler
+from scipy import stats
 
 # ============================================================
 # 1. Pure PyTorch Mamba (CPU & Cloud Compatible)
@@ -227,7 +228,29 @@ class StockMambaModel(nn.Module):
 
 
 # ============================================================
-# 3. Streamlit Interface
+# 3. Peer Universe (used for t-test similarity analysis)
+# ============================================================
+TICKERS = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AVGO", "AMD", "ADBE",
+    "CRM", "ORCL", "INTC", "CSCO", "QCOM", "TXN", "IBM", "NOW", "INTU", "AMAT",
+    "JPM", "BAC", "WFC", "GS", "MS", "V", "MA", "AXP", "SPGI", "BLK",
+    "JNJ", "PFE", "UNH", "MRK", "ABBV", "LLY", "TMO", "ABT", "BMY", "GILD",
+    "XOM", "CVX", "PG", "KO", "PEP", "WMT", "HD", "MCD", "DIS", "NKE",
+]
+
+
+@st.cache_data(ttl=3600)
+def fetch_peer_returns(tickers, period="1y"):
+    """Fetch daily % returns for a list of tickers over a fixed lookback period."""
+    data = yf.download(tickers, period=period, progress=False, auto_adjust=True)["Close"]
+    if isinstance(data, pd.Series):
+        data = data.to_frame(name=tickers[0])
+    returns = data.pct_change().dropna(how="all")
+    return returns
+
+
+# ============================================================
+# 4. Streamlit Interface
 # ============================================================
 @st.cache_resource
 def load_artifacts(artifact_dir="artifacts"):
@@ -354,3 +377,80 @@ if run_btn or ticker_input:
         c1.metric("Last Known Close", f"${last_known_price:.2f}")
         c2.metric("Predicted Close", f"${final_forecast_price:.2f}")
         c3.metric("Projected Return", f"{projected_return:+.2f}%")
+
+# ============================================================
+# Peer Similarity Analysis (t-test on daily returns)
+# ============================================================
+st.markdown("---")
+st.subheader("🔬 Peer Similarity Analysis (t-test on Daily Returns)")
+st.markdown(
+    f"Runs an independent two-sample **t-test (Welch's)** comparing **{ticker_input}**'s daily "
+    "% returns over the last 1 year against each of the 50 large-cap tickers below. "
+    "The **p-value** is used as the similarity number: a **higher p-value** means we cannot "
+    "statistically distinguish the two stocks' average daily returns (more *similar*), while a "
+    "**low p-value** (e.g. < 0.05) means their average returns are significantly different."
+)
+
+run_similarity = st.button("Run Similarity Analysis")
+
+if run_similarity:
+    peer_list = [t for t in TICKERS if t != ticker_input]
+    all_tickers_for_fetch = list(dict.fromkeys(peer_list + [ticker_input]))
+
+    with st.spinner(f"Fetching 1-year daily return data for {ticker_input} and {len(peer_list)} peers..."):
+        try:
+            peer_returns_df = fetch_peer_returns(all_tickers_for_fetch, period="1y")
+        except Exception as e:
+            peer_returns_df = None
+            st.error(f"Error fetching peer return data: {e}")
+
+    if peer_returns_df is None or ticker_input not in peer_returns_df.columns:
+        st.error(f"Could not retrieve 1-year daily return data for '{ticker_input}'.")
+    else:
+        target_returns = peer_returns_df[ticker_input].dropna()
+
+        results = []
+        for peer in peer_list:
+            if peer not in peer_returns_df.columns:
+                continue
+            peer_returns = peer_returns_df[peer].dropna()
+            if len(peer_returns) < 10 or len(target_returns) < 10:
+                continue
+            t_stat, p_value = stats.ttest_ind(
+                target_returns, peer_returns, equal_var=False, nan_policy="omit"
+            )
+            results.append({
+                "Ticker": peer,
+                "t-statistic": t_stat,
+                "Similarity (p-value)": p_value,
+            })
+
+        if not results:
+            st.warning("No comparable peer return data could be retrieved.")
+        else:
+            df_results = (
+                pd.DataFrame(results)
+                .sort_values("Similarity (p-value)", ascending=False)
+                .reset_index(drop=True)
+            )
+            df_results.index += 1
+
+            st.dataframe(
+                df_results.style.format({
+                    "t-statistic": "{:.4f}",
+                    "Similarity (p-value)": "{:.4f}",
+                }),
+                use_container_width=True,
+            )
+
+            most_similar = df_results.iloc[0]
+            least_similar = df_results.iloc[-1]
+            m1, m2 = st.columns(2)
+            m1.success(
+                f"Most similar peer: **{most_similar['Ticker']}** "
+                f"(p-value = {most_similar['Similarity (p-value)']:.4f})"
+            )
+            m2.info(
+                f"Least similar peer: **{least_similar['Ticker']}** "
+                f"(p-value = {least_similar['Similarity (p-value)']:.4f})"
+            )
